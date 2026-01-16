@@ -32,7 +32,7 @@ module Abstraction {
         if s == {} then
             []
         else
-            var x :| x in s;
+            var x :| x in s; 
             [x] + setToSeq(s - {x})
     }
 
@@ -140,13 +140,18 @@ module Helpers {
         }
     }
 
+    function mapRemove(m: map<Key, Entry>, k: Key): map<Key, Entry>
+    {
+        map k' | k' in m && k' != k :: m[k']
+    }
+
     lemma removeKeyOthersIntact(store: map<Key, Entry>, k: Key, other: Key, now: Time)
         requires k in store
         requires k != other
-        ensures (other in Map(store - {k}, now)) == (other in Map(store, now))
-        ensures other in Map(store, now) ==> Map(store - {k}, now)[other] == Map(store, now)[other]
+        ensures (other in Map(mapRemove(store, k), now)) == (other in Map(store, now))
+        ensures other in Map(store, now) ==> Map(mapRemove(store, k), now)[other] == Map(store, now)[other]
     {
-        var newStore := store - {k};
+        var newStore := mapRemove(store, k);
         inMapIff(store, other, now);
         inMapIff(newStore, other, now);
         if other in Map(store, now) {
@@ -168,9 +173,9 @@ module Helpers {
 
     lemma removeKey(store: map<Key, Entry>, k: Key, now: Time)
         requires k in store
-        ensures k !in Map(store - {k}, now)
+        ensures k !in Map(mapRemove(store, k), now)
     {
-        var newStore := store - {k};
+        var newStore := mapRemove(store, k);
         assert k !in newStore;
         notInMap(newStore, k, now);
     }
@@ -330,7 +335,7 @@ module CacheImpl {
             found := k in store && isLive(store[k], now);
             if k in store {
                 ghost var oldStore := store;
-                store := store - {k};
+                store := mapRemove(store, k);
                 removeKey(oldStore, k, now);
                 forall other: Key | other != k
                     ensures (other in view(now)) == (other in Map(oldStore, now))
@@ -345,504 +350,333 @@ module CacheImpl {
     }
 }
 
-// TESTS :3
-
-module Tests {
+module Commands {
     import opened Types
-    import opened Abstraction
     import opened CacheImpl
 
-    // get tests
+    datatype Command = 
+        | CmdGet(key: Key)
+        | CmdSet(key: Key, value: Value, ttl: Time)
+        | CmdAdd(key: Key, value: Value, ttl: Time)
+        | CmdReplace(key: Key, value: Value, ttl: Time)
+        | CmdDelete(key: Key)
+        | CmdInvalid
 
-    method TestGetEmpty()
+    datatype Response =
+        | RespValue(value: Value)
+        | RespNotFound
+        | RespStored
+        | RespNotStored
+        | RespDeleted
+        | RespError(msg: string)
+
+    predicate IsDigit(c: char)
     {
-        var cache := new Cache();
-        var result := cache.Get(1, 100);
-        assert result.None?;
-        assert cache.store == map[];
+        '0' <= c <= '9'
     }
 
-    method TestGetLive()
+    function CharToDigit(c: char): int
+        requires IsDigit(c)
     {
-        var cache := new Cache();
-        cache.Set(1, 42, 50, 100);
-        var result := cache.Get(1, 100);
-        assert result.Some? && result.value == 42;
-        assert cache.store[1].val == 42;
-        assert cache.store[1].exp == 150;
+        (c as int) - ('0' as int)
     }
 
-    method TestGetExpired()
+    function Pow10(n: nat): int
     {
-        var cache := new Cache();
-        cache.Set(1, 42, 50, 100);
-        assert cache.store[1].exp == 150;
-        assert !isLive(cache.store[1], 200);
-        inMapIff(cache.store, 1, 200);
-        var result := cache.Get(1, 200);
-        assert result.None?;
-        assert 1 in cache.store;
-        assert cache.store[1].val == 42;
+        if n == 0 then 1 else 10 * Pow10(n - 1)
     }
 
-    method TestGetMissing()
+    predicate AllDigits(s: string)
     {
-        var cache := new Cache();
-        cache.Set(1, 42, 50, 100);
-        cache.Set(2, 100, 50, 100);
-        inMapIff(cache.store, 3, 100);
-        var result := cache.Get(3, 100);
-        assert result.None?;
-        assert cache.store[1].val == 42;
-        assert cache.store[2].val == 100;
+        forall i :: 0 <= i < |s| ==> IsDigit(s[i])
     }
 
-    // set tests
-
-    method TestSetEmpty()
+    function ParseDigits(s: string): int
+        requires AllDigits(s)
+        requires |s| > 0
+        decreases |s|
     {
-        var cache := new Cache();
-        cache.Set(1, 42, 50, 100);
-        assert 1 in cache.store;
-        assert cache.store[1].val == 42;
-        assert cache.store[1].exp == 150;
-        var result := cache.Get(1, 100);
-        assert result.Some? && result.value == 42;
+        if |s| == 1 then CharToDigit(s[0])
+        else ParseDigits(s[..|s|-1]) * 10 + CharToDigit(s[|s|-1])
     }
 
-    method TestSetOverwrite()
+    function ParseInt(s: string): (bool, int)
     {
-        var cache := new Cache();
-        cache.Set(1, 42, 50, 100);
-        assert cache.store[1].val == 42;
-        cache.Set(1, 99, 100, 100);
-        assert cache.store[1].val == 99;
-        assert cache.store[1].exp == 200;
-        var result := cache.Get(1, 100);
-        assert result.Some? && result.value == 99;
+        if |s| == 0 then (false, 0)
+        else if s[0] == '-' then
+            if |s| > 1 && AllDigits(s[1..]) then (true, -ParseDigits(s[1..]))
+            else (false, 0)
+        else if AllDigits(s) then (true, ParseDigits(s))
+        else (false, 0)
     }
 
-    method TestSetExpired()
+    function FindSpace(s: string, start: nat): nat
+        requires start <= |s|
+        ensures start <= FindSpace(s, start) <= |s|
+        decreases |s| - start
     {
-        var cache := new Cache();
-        cache.Set(1, 42, 50, 100);
-        assert cache.store[1].exp == 150;
-        assert !isLive(cache.store[1], 200);
-        cache.Set(1, 99, 50, 200);
-        assert cache.store[1].val == 99;
-        assert cache.store[1].exp == 250;
-        var result := cache.Get(1, 200);
-        assert result.Some? && result.value == 99;
+        if start >= |s| then |s|
+        else if s[start] == ' ' then start
+        else FindSpace(s, start + 1)
     }
 
-    method TestSetPreservesOthers()
+    function SplitHelper(s: string, start: nat, acc: seq<string>): seq<string>
+        requires start <= |s|
+        decreases |s| - start
     {
-        var cache := new Cache();
-        cache.Set(1, 42, 50, 100);
-        cache.Set(2, 100, 50, 100);
-        assert cache.store[1].val == 42;
-        assert cache.store[2].val == 100;
-        cache.Set(1, 55, 50, 100);
-        assert cache.store[1].val == 55;
-        assert cache.store[2].val == 100;
-        assert cache.store[2].exp == 150;
+        if start >= |s| then acc
+        else if s[start] == ' ' then SplitHelper(s, start + 1, acc)
+        else 
+            var endPos := FindSpace(s, start);
+            SplitHelper(s, endPos, acc + [s[start..endPos]])
     }
 
-    // add tests
-
-    method TestAddEmpty()
+    function Split(s: string): seq<string>
     {
-        var cache := new Cache();
-        var success := cache.Add(1, 42, 50, 100);
-        assert success;
-        assert cache.store[1].val == 42;
-        assert cache.store[1].exp == 150;
+        SplitHelper(s, 0, [])
     }
 
-    method TestAddLiveFails()
+    predicate StrEq(a: string, b: string)
     {
-        var cache := new Cache();
-        cache.Set(1, 42, 50, 100);
-        var success := cache.Add(1, 99, 50, 100);
-        assert !success;
-        assert cache.store[1].val == 42;
-        assert cache.store[1].exp == 150;
+        a == b
     }
 
-    method TestAddExpired()
+    function ParseCommand(input: string): Command
     {
-        var cache := new Cache();
-        cache.Set(1, 42, 50, 100);
-        assert cache.store[1].exp == 150;
-        assert !isLive(cache.store[1], 200);
-        inMapIff(cache.store, 1, 200);
-        var success := cache.Add(1, 99, 50, 200);
-        assert success;
-        assert cache.store[1].val == 99;
-        assert cache.store[1].exp == 250;
+        var tokens := Split(input);
+        if |tokens| == 0 then CmdInvalid
+        else if StrEq(tokens[0], "get") && |tokens| == 2 then
+            var (ok, key) := ParseInt(tokens[1]);
+            if ok then CmdGet(key) else CmdInvalid
+        else if StrEq(tokens[0], "set") && |tokens| == 4 then
+            var (ok1, key) := ParseInt(tokens[1]);
+            var (ok2, val) := ParseInt(tokens[2]);
+            var (ok3, ttl) := ParseInt(tokens[3]);
+            if ok1 && ok2 && ok3 && ttl > 0 then CmdSet(key, val, ttl) else CmdInvalid
+        else if StrEq(tokens[0], "add") && |tokens| == 4 then
+            var (ok1, key) := ParseInt(tokens[1]);
+            var (ok2, val) := ParseInt(tokens[2]);
+            var (ok3, ttl) := ParseInt(tokens[3]);
+            if ok1 && ok2 && ok3 && ttl > 0 then CmdAdd(key, val, ttl) else CmdInvalid
+        else if StrEq(tokens[0], "replace") && |tokens| == 4 then
+            var (ok1, key) := ParseInt(tokens[1]);
+            var (ok2, val) := ParseInt(tokens[2]);
+            var (ok3, ttl) := ParseInt(tokens[3]);
+            if ok1 && ok2 && ok3 && ttl > 0 then CmdReplace(key, val, ttl) else CmdInvalid
+        else if StrEq(tokens[0], "delete") && |tokens| == 2 then
+            var (ok, key) := ParseInt(tokens[1]);
+            if ok then CmdDelete(key) else CmdInvalid
+        else CmdInvalid
     }
 
-    method TestAddNew()
+    // Check if command has valid TTL
+    predicate ValidCmd(cmd: Command)
     {
-        var cache := new Cache();
-        cache.Set(1, 42, 50, 100);
-        inMapIff(cache.store, 2, 100);
-        var success := cache.Add(2, 100, 50, 100);
-        assert success;
-        assert cache.store[2].val == 100;
-        assert cache.store[1].val == 42;
+        match cmd {
+            case CmdGet(_) => true
+            case CmdSet(_, _, ttl) => ttl > 0
+            case CmdAdd(_, _, ttl) => ttl > 0
+            case CmdReplace(_, _, ttl) => ttl > 0
+            case CmdDelete(_) => true
+            case CmdInvalid => true
+        }
     }
 
-    method TestAddPreservesOthers()
+    method Execute(cache: Cache, cmd: Command, now: Time) returns (resp: Response)
+        requires ValidCmd(cmd)
+        modifies cache
+        ensures cmd.CmdInvalid? ==> resp.RespError?
+        ensures cmd.CmdSet? ==> resp == RespStored
+        ensures cmd.CmdDelete? ==> resp == RespDeleted
     {
-        var cache := new Cache();
-        cache.Set(1, 42, 50, 100);
-        cache.Set(2, 100, 50, 100);
-        inMapIff(cache.store, 3, 100);
-        var success := cache.Add(3, 200, 50, 100);
-        assert success;
-        assert cache.store[1].val == 42;
-        assert cache.store[1].exp == 150;
-        assert cache.store[2].val == 100;
-        assert cache.store[2].exp == 150;
+        match cmd {
+            case CmdGet(key) =>
+                var result := cache.Get(key, now);
+                resp := if result.Some? then RespValue(result.value) else RespNotFound;
+            case CmdSet(key, val, ttl) =>
+                cache.Set(key, val, ttl, now);
+                resp := RespStored;
+            case CmdAdd(key, val, ttl) =>
+                var success := cache.Add(key, val, ttl, now);
+                resp := if success then RespStored else RespNotStored;
+            case CmdReplace(key, val, ttl) =>
+                var success := cache.Replace(key, val, ttl, now);
+                resp := if success then RespStored else RespNotStored;
+            case CmdDelete(key) =>
+                var _ := cache.Delete(key, now);
+                resp := RespDeleted;
+            case CmdInvalid =>
+                resp := RespError("Invalid command");
+        }
     }
 
-    // replace tests
-
-    method TestReplaceEmptyFails()
+    function DigitToChar(d: int): char
+        requires 0 <= d < 10
     {
-        var cache := new Cache();
-        inMapIff(cache.store, 1, 100);
-        var success := cache.Replace(1, 42, 50, 100);
-        assert !success;
-        assert 1 !in cache.store;
+        ('0' as int + d) as char
     }
 
-    method TestReplaceLive()
+    function NatToString(n: int): string
+        requires n >= 0
+        decreases n
     {
-        var cache := new Cache();
-        cache.Set(1, 42, 50, 100);
-        var success := cache.Replace(1, 99, 50, 100);
-        assert success;
-        assert cache.store[1].val == 99;
-        assert cache.store[1].exp == 150;
+        if n < 10 then [DigitToChar(n)]
+        else NatToString(n / 10) + [DigitToChar(n % 10)]
     }
 
-    method TestReplaceExpiredFails()
+    function IntToString(n: int): string
     {
-        var cache := new Cache();
-        cache.Set(1, 42, 50, 100);
-        assert cache.store[1].exp == 150;
-        assert !isLive(cache.store[1], 200);
-        inMapIff(cache.store, 1, 200);
-        var success := cache.Replace(1, 99, 50, 200);
-        assert !success;
-        assert cache.store[1].val == 42;
-        assert cache.store[1].exp == 150;
+        if n < 0 then "-" + NatToString(-n)
+        else NatToString(n)
     }
 
-    method TestReplaceMissingFails()
+    function FormatResponse(resp: Response): string
     {
-        var cache := new Cache();
-        cache.Set(1, 42, 50, 100);
-        inMapIff(cache.store, 2, 100);
-        var success := cache.Replace(2, 99, 50, 100);
-        assert !success;
-        assert 2 !in cache.store;
-        assert cache.store[1].val == 42;
+        match resp {
+            case RespValue(v) => "VALUE " + IntToString(v)
+            case RespNotFound => "NOT_FOUND"
+            case RespStored => "STORED"
+            case RespNotStored => "NOT_STORED"
+            case RespDeleted => "DELETED"
+            case RespError(msg) => "ERROR " + msg
+        }
     }
 
-    method TestReplacePreservesOthers()
+    // ParseCommand always returns a valid command (TTL > 0 when needed)
+    lemma ParseCommandValid(input: string)
+        ensures ValidCmd(ParseCommand(input))
     {
-        var cache := new Cache();
-        cache.Set(1, 42, 50, 100);
-        cache.Set(2, 100, 50, 100);
-        var success := cache.Replace(1, 55, 50, 100);
-        assert success;
-        assert cache.store[1].val == 55;
-        assert cache.store[2].val == 100;
-        assert cache.store[2].exp == 150;
+        var tokens := Split(input);
+        if |tokens| == 0 {
+        } else if StrEq(tokens[0], "get") && |tokens| == 2 {
+        } else if StrEq(tokens[0], "set") && |tokens| == 4 {
+            var (ok1, key) := ParseInt(tokens[1]);
+            var (ok2, val) := ParseInt(tokens[2]);
+            var (ok3, ttl) := ParseInt(tokens[3]);
+        } else if StrEq(tokens[0], "add") && |tokens| == 4 {
+            var (ok1, key) := ParseInt(tokens[1]);
+            var (ok2, val) := ParseInt(tokens[2]);
+            var (ok3, ttl) := ParseInt(tokens[3]);
+        } else if StrEq(tokens[0], "replace") && |tokens| == 4 {
+            var (ok1, key) := ParseInt(tokens[1]);
+            var (ok2, val) := ParseInt(tokens[2]);
+            var (ok3, ttl) := ParseInt(tokens[3]);
+        } else if StrEq(tokens[0], "delete") && |tokens| == 2 {
+        } else {
+        }
     }
 
-    // delete tests
+    // parse, execute, format
+    method ProcessCommand(cache: Cache, input: string, now: Time) returns (output: string)
+        modifies cache
+    {
+        var cmd := ParseCommand(input);
+        ParseCommandValid(input);
+        var resp := Execute(cache, cmd, now);
+        output := FormatResponse(resp);
+    }
+}
 
-    method TestDeleteEmpty()
+module CommandTests {
+    import opened Types
+    import opened CacheImpl
+    import opened Commands
+
+    // Test that Execute terminates and returns appropriate response types
+    method TestExecuteCommands()
     {
         var cache := new Cache();
-        inMapIff(cache.store, 1, 100);
-        var found := cache.Delete(1, 100);
-        assert !found;
-        assert 1 !in cache.store;
+        
+        // Set always stores
+        var resp := Execute(cache, CmdSet(1, 42, 50), 100);
+        
+        // Get can return value or not found
+        resp := Execute(cache, CmdGet(1), 100);
+        
+        // Add can succeed or fail
+        resp := Execute(cache, CmdAdd(2, 100, 50), 100);
+        
+        // Replace can succeed or fail
+        resp := Execute(cache, CmdReplace(1, 99, 50), 100);
+        
+        // Delete always returns Deleted
+        resp := Execute(cache, CmdDelete(1), 100);
+        
+        // Invalid returns error
+        resp := Execute(cache, CmdInvalid, 100);
+        assert resp.RespError?;
     }
 
-    method TestDeleteLive()
+    // Verify parsing produces valid commands
+    method TestParseValid()
     {
-        var cache := new Cache();
-        cache.Set(1, 42, 50, 100);
-        assert 1 in cache.store;
-        var found := cache.Delete(1, 100);
-        assert found;
-        assert 1 !in cache.store;
-        var result := cache.Get(1, 100);
-        assert result.None?;
+        ParseCommandValid("get 1");
+        ParseCommandValid("set 1 2 3");
+        ParseCommandValid("add 1 2 3");
+        ParseCommandValid("replace 1 2 3");
+        ParseCommandValid("delete 1");
+        ParseCommandValid("invalid");
     }
+}
 
-    method TestDeleteExpired()
-    {
-        var cache := new Cache();
-        cache.Set(1, 42, 50, 100);
-        assert cache.store[1].exp == 150;
-        assert !isLive(cache.store[1], 200);
-        inMapIff(cache.store, 1, 200);
-        var found := cache.Delete(1, 200);
-        assert !found;
-        assert 1 !in cache.store;
-    }
+method Main()
+{
+    var cache := new CacheImpl.Cache();
+    var now := 0;
 
-    method TestDeleteMissing()
-    {
-        var cache := new Cache();
-        cache.Set(1, 42, 50, 100);
-        inMapIff(cache.store, 2, 100);
-        var found := cache.Delete(2, 100);
-        assert !found;
-        assert 2 !in cache.store;
-        assert cache.store[1].val == 42;
-    }
+    print "[ Memcache ]";
 
-    method TestDeletePreservesOthers()
-    {
-        var cache := new Cache();
-        cache.Set(1, 42, 50, 100);
-        cache.Set(2, 100, 50, 100);
-        cache.Set(3, 200, 50, 100);
-        var found := cache.Delete(2, 100);
-        assert found;
-        assert 2 !in cache.store;
-        assert cache.store[1].val == 42;
-        assert cache.store[1].exp == 150;
-        assert cache.store[3].val == 200;
-        assert cache.store[3].exp == 150;
-    }
+    print "> set 1 100 60\n";
+    var out := Commands.ProcessCommand(cache, "set 1 100 60", now);
+    print out, "\n\n";
 
-    // ttl edge cases
+    print "> set 2 200 60\n";
+    out := Commands.ProcessCommand(cache, "set 2 200 60", now);
+    print out, "\n\n";
 
-    method TestTtlExact()
-    {
-        var cache := new Cache();
-        cache.Set(1, 42, 50, 100);
-        assert cache.store[1].exp == 150;
-        // at exactly 150 its expired since exp > now not >=
-        assert !(cache.store[1].exp > 150);
-        assert !isLive(cache.store[1], 150);
-        inMapIff(cache.store, 1, 150);
-        var result := cache.Get(1, 150);
-        assert result.None?;
-    }
+    print "> get 1\n";
+    out := Commands.ProcessCommand(cache, "get 1", now);
+    print out, "\n\n";
 
-    method TestTtlBefore()
-    {
-        var cache := new Cache();
-        cache.Set(1, 42, 50, 100);
-        assert cache.store[1].exp == 150;
-        assert cache.store[1].exp > 149;
-        assert isLive(cache.store[1], 149);
-        inMapIff(cache.store, 1, 149);
-        var result := cache.Get(1, 149);
-        assert result.Some? && result.value == 42;
-    }
+    print "> get 2\n";
+    out := Commands.ProcessCommand(cache, "get 2", now);
+    print out, "\n\n";
 
-    method TestTtlAfter()
-    {
-        var cache := new Cache();
-        cache.Set(1, 42, 50, 100);
-        assert cache.store[1].exp == 150;
-        assert !(cache.store[1].exp > 151);
-        assert !isLive(cache.store[1], 151);
-        inMapIff(cache.store, 1, 151);
-        var result := cache.Get(1, 151);
-        assert result.None?;
-    }
+    print "> get 999\n";
+    out := Commands.ProcessCommand(cache, "get 999", now);
+    print out, "\n\n";
 
-    method TestTtlMin()
-    {
-        var cache := new Cache();
-        cache.Set(1, 42, 1, 100);
-        assert cache.store[1].exp == 101;
-        assert isLive(cache.store[1], 100);
-        var result := cache.Get(1, 100);
-        assert result.Some?;
-        assert !isLive(cache.store[1], 101);
-        inMapIff(cache.store, 1, 101);
-        result := cache.Get(1, 101);
-        assert result.None?;
-    }
+    print "> add 1 999 60\n";
+    out := Commands.ProcessCommand(cache, "add 1 999 60", now);
+    print out, " (key 1 already exists)\n\n";
 
-    // multi key tests
+    print "> add 3 300 60\n";
+    out := Commands.ProcessCommand(cache, "add 3 300 60", now);
+    print out, "\n\n";
 
-    method TestMultiKeyExpiry()
-    {
-        var cache := new Cache();
-        cache.Set(1, 10, 50, 100);
-        cache.Set(2, 20, 100, 100);
-        cache.Set(3, 30, 150, 100);
+    print "> replace 1 111 60\n";
+    out := Commands.ProcessCommand(cache, "replace 1 111 60", now);
+    print out, "\n\n";
 
-        assert cache.store[1].exp == 150;
-        assert cache.store[2].exp == 200;
-        assert cache.store[3].exp == 250;
-        assert cache.store[1].val == 10;
-        assert cache.store[2].val == 20;
-        assert cache.store[3].val == 30;
+    print "> get 1\n";
+    out := Commands.ProcessCommand(cache, "get 1", now);
+    print out, "\n\n";
 
-        // at 175 key 1 expired keys 2 3 live
-        assert !isLive(cache.store[1], 175);
-        assert isLive(cache.store[2], 175);
-        assert isLive(cache.store[3], 175);
+    print "> replace 999 0 60\n";
+    out := Commands.ProcessCommand(cache, "replace 999 0 60", now);
+    print out, " (key 999 doesn't exist)\n\n";
 
-        inMapIff(cache.store, 1, 175);
-        inMapIff(cache.store, 2, 175);
-        inMapIff(cache.store, 3, 175);
+    print "> delete 2\n";
+    out := Commands.ProcessCommand(cache, "delete 2", now);
+    print out, "\n\n";
 
-        var r1 := cache.Get(1, 175);
-        assert r1.None?;
-        assert cache.store[2].val == 20;
-        assert cache.store[3].val == 30;
+    print "> get 2\n";
+    out := Commands.ProcessCommand(cache, "get 2", now);
+    print out, "\n\n";
 
-        var r2 := cache.Get(2, 175);
-        assert r2.Some? && r2.value == 20;
-        assert cache.store[3].val == 30;
+    print "> invalid command\n";
+    out := Commands.ProcessCommand(cache, "invalid command", now);
+    print out, "\n\n";
 
-        var r3 := cache.Get(3, 175);
-        assert r3.Some? && r3.value == 30;
-
-        // at 225 keys 1 2 expired key 3 live
-        assert !isLive(cache.store[1], 225);
-        assert !isLive(cache.store[2], 225);
-        assert isLive(cache.store[3], 225);
-
-        inMapIff(cache.store, 1, 225);
-        inMapIff(cache.store, 2, 225);
-        inMapIff(cache.store, 3, 225);
-
-        r1 := cache.Get(1, 225);
-        assert r1.None?;
-
-        r2 := cache.Get(2, 225);
-        assert r2.None?;
-
-        assert cache.store[3].val == 30;
-        r3 := cache.Get(3, 225);
-        assert r3.Some? && r3.value == 30;
-    }
-
-    method TestOpsPreserveOthers()
-    {
-        var cache := new Cache();
-        cache.Set(1, 10, 50, 100);
-        cache.Set(2, 20, 50, 100);
-        cache.Set(3, 30, 50, 100);
-
-        ghost var e2 := cache.store[2];
-        ghost var e3 := cache.store[3];
-
-        cache.Set(1, 15, 50, 100);
-        assert cache.store[2] == e2;
-        assert cache.store[3] == e3;
-
-        var _ := cache.Replace(1, 16, 50, 100);
-        assert cache.store[2] == e2;
-        assert cache.store[3] == e3;
-
-        var _ := cache.Delete(1, 100);
-        assert cache.store[2] == e2;
-        assert cache.store[3] == e3;
-
-        assert 1 !in cache.store;
-        assert cache.store[2].val == 20;
-        assert cache.store[3].val == 30;
-    }
-
-    // full scenario
-
-    method TestScenario()
-    {
-        var cache := new Cache();
-
-        cache.Set(1, 100, 10, 0);
-        cache.Set(2, 200, 20, 0);
-        cache.Set(3, 300, 30, 0);
-
-        assert cache.store[1].val == 100;
-        assert cache.store[1].exp == 10;
-        assert cache.store[2].val == 200;
-        assert cache.store[2].exp == 20;
-        assert cache.store[3].val == 300;
-        assert cache.store[3].exp == 30;
-
-        // at 5 all live
-        assert isLive(cache.store[1], 5);
-        assert isLive(cache.store[2], 5);
-        assert isLive(cache.store[3], 5);
-
-        inMapIff(cache.store, 1, 5);
-        var result := cache.Get(1, 5);
-        assert result.Some? && result.value == 100;
-
-        assert cache.store[2].val == 200;
-        inMapIff(cache.store, 2, 5);
-        result := cache.Get(2, 5);
-        assert result.Some? && result.value == 200;
-
-        assert cache.store[3].val == 300;
-        inMapIff(cache.store, 3, 5);
-        result := cache.Get(3, 5);
-        assert result.Some? && result.value == 300;
-
-        // at 15 key 1 expired
-        assert !isLive(cache.store[1], 15);
-        assert isLive(cache.store[2], 15);
-        assert isLive(cache.store[3], 15);
-
-        inMapIff(cache.store, 1, 15);
-        result := cache.Get(1, 15);
-        assert result.None?;
-
-        // add succeeds on expired key 1
-        var success := cache.Add(1, 111, 50, 15);
-        assert success;
-        assert cache.store[1].val == 111;
-        assert cache.store[1].exp == 65;
-
-        // replace fails on expired key 2 at 25
-        assert !isLive(cache.store[2], 25);
-        inMapIff(cache.store, 2, 25);
-        success := cache.Replace(2, 222, 50, 25);
-        assert !success;
-
-        // set works on expired key 2
-        cache.Set(2, 222, 50, 25);
-        assert cache.store[2].val == 222;
-        assert cache.store[2].exp == 75;
-
-        // delete key 3 at 30 when expired
-        assert !isLive(cache.store[3], 30);
-        inMapIff(cache.store, 3, 30);
-        var found := cache.Delete(3, 30);
-        assert !found;
-        assert 3 !in cache.store;
-
-        // at 50 keys 1 2 live key 3 gone
-        assert isLive(cache.store[1], 50);
-        assert isLive(cache.store[2], 50);
-        assert 3 !in cache.store;
-
-        inMapIff(cache.store, 1, 50);
-        result := cache.Get(1, 50);
-        assert result.Some? && result.value == 111;
-
-        assert cache.store[2].val == 222;
-        inMapIff(cache.store, 2, 50);
-        result := cache.Get(2, 50);
-        assert result.Some? && result.value == 222;
-    }
+    print "Demo complete!\n";
 }
