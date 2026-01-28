@@ -677,20 +677,67 @@ module CacheImpl {
         {
             var entry := StoreEntry(k, v, now + ttl);
             ghost var oldStore := store;
-            var idx := ScanForKey(k);
+            ghost var oldView := view(now);
             
-            if idx >= 0 {
-                store := store[idx := entry];
-                assert isLive(store[idx], now);
-                updateKey(oldStore, idx, entry, now);
+            var i := 0;
+            var found := false;
+            var foundIdx := -1;
+            
+            while i < |store|
+                invariant 0 <= i <= |store|
+                invariant foundIdx == -1 || (0 <= foundIdx < i && store[foundIdx].key == k)
+                invariant !found <==> foundIdx == -1
+                invariant found <==> (foundIdx >= 0 && store[foundIdx].key == k)
+                invariant foundIdx == -1 ==> forall j :: 0 <= j < i ==> store[j].key != k
+                invariant store == oldStore
+                invariant Valid()
+            {
+                if store[i].key == k {
+                    found := true;
+                    foundIdx := i;
+                    break;
+                }
+                i := i + 1;
+            }
+            
+            // found <==> key exists in store
+            assert found <==> FindIndex(store, k) >= 0;
+            assert found ==> foundIdx == FindIndex(store, k);
+            
+            if found {
+                // Update existing entry - build new store with loop
+                var newStore: seq<StoreEntry> := [];
+                var j := 0;
+                
+                while j < |store|
+                    invariant 0 <= j <= |store|
+                    invariant |newStore| == j
+                    invariant forall m :: 0 <= m < j ==> 
+                        newStore[m] == (if m == foundIdx then entry else store[m])
+                    invariant forall m, n :: 0 <= m < n < |newStore| ==> newStore[m].key != newStore[n].key
+                {
+                    if j == foundIdx {
+                        newStore := newStore + [entry];
+                    } else {
+                        newStore := newStore + [store[j]];
+                    }
+                    j := j + 1;
+                }
+                
+                assert newStore == store[foundIdx := entry];
+                store := newStore;
+                
+                assert isLive(store[foundIdx], now);
+                updateKey(oldStore, foundIdx, entry, now);
                 
                 forall other: Key | other != k
                     ensures (other in view(now)) == (other in Map(oldStore, now))
                     ensures other in Map(oldStore, now) ==> view(now)[other] == Map(oldStore, now)[other]
                 {
-                    updateKeyOthersIntact(oldStore, idx, entry, other, now);
+                    updateKeyOthersIntact(oldStore, foundIdx, entry, other, now);
                 }
             } else {
+                // Append new entry
                 store := store + [entry];
                 assert isLive(store[|store|-1], now);
                 appendKey(oldStore, entry, now);
@@ -719,12 +766,16 @@ module CacheImpl {
         {
             var idx := ScanForKey(k);
             inMapIff(store, k, now);
+            
             if idx >= 0 && isLive(store[idx], now) {
+                // Key exists and is live - cannot add
                 success := false;
             } else {
                 var entry := StoreEntry(k, v, now + ttl);
                 ghost var oldStore := store;
+                
                 if idx >= 0 {
+                    // Key exists but expired - update using sequence update
                     store := store[idx := entry];
                     updateKey(oldStore, idx, entry, now);
                     forall other: Key | other != k
@@ -734,6 +785,7 @@ module CacheImpl {
                         updateKeyOthersIntact(oldStore, idx, entry, other, now);
                     }
                 } else {
+                    // Key doesn't exist - append
                     store := store + [entry];
                     appendKey(oldStore, entry, now);
                     forall other: Key | other != k
@@ -760,9 +812,12 @@ module CacheImpl {
                 (other in old(view(now)) ==> view(now)[other] == old(view(now))[other])
             ensures !success ==> store == old(store)
         {
+            // Functional approach: use ScanForKey helper
             var idx := ScanForKey(k);
             inMapIff(store, k, now);
+            
             if idx >= 0 && isLive(store[idx], now) {
+                // Key exists and is live - replace using sequence update
                 var entry := StoreEntry(k, v, now + ttl);
                 ghost var oldStore := store;
                 store := store[idx := entry];
@@ -789,9 +844,11 @@ module CacheImpl {
                 ((other in view(now)) == (other in old(view(now)))) &&
                 (other in old(view(now)) ==> view(now)[other] == old(view(now))[other])
         {
+            // Functional approach: use ScanForKey helper and seqRemove function
             var idx := ScanForKey(k);
             inMapIff(store, k, now);
             found := idx >= 0 && isLive(store[idx], now);
+            
             if idx >= 0 {
                 ghost var oldStore := store;
                 store := seqRemove(store, idx);
