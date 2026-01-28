@@ -3,119 +3,195 @@ module Types {
     type Value = int
     type Time = int
 
-    datatype Entry = Entry(val: Value, exp: Time)
+    datatype StoreEntry = StoreEntry(key: Key, val: Value, exp: Time)
     datatype Option<T> = None | Some(value: T)
 
-    predicate isLive(e: Entry, now: Time)
+    predicate isLive(e: StoreEntry, now: Time)
     {
         e.exp > now
     }
 
-    predicate keyLive(store: map<Key, Entry>, k: Key, now: Time)
+    predicate UniqueKeys(store: seq<StoreEntry>)
     {
-        k in store && isLive(store[k], now)
+        forall i, j :: 0 <= i < j < |store| ==> store[i].key != store[j].key
     }
 
-    predicate keyDead(store: map<Key, Entry>, k: Key, now: Time)
+    function FindIndex(store: seq<StoreEntry>, k: Key): int
+        ensures -1 <= FindIndex(store, k) < |store|
+        ensures FindIndex(store, k) >= 0 ==> store[FindIndex(store, k)].key == k
+        ensures FindIndex(store, k) == -1 ==> forall i :: 0 <= i < |store| ==> store[i].key != k
     {
-        k !in store || !isLive(store[k], now)
+        FindIndexHelper(store, k, 0)
+    }
+
+    function FindIndexHelper(store: seq<StoreEntry>, k: Key, start: nat): int
+        requires start <= |store|
+        ensures -1 <= FindIndexHelper(store, k, start) < |store|
+        ensures FindIndexHelper(store, k, start) >= 0 ==> store[FindIndexHelper(store, k, start)].key == k
+        ensures FindIndexHelper(store, k, start) == -1 ==> forall i :: start <= i < |store| ==> store[i].key != k
+        decreases |store| - start
+    {
+        if start >= |store| then -1
+        else if store[start].key == k then start
+        else FindIndexHelper(store, k, start + 1)
+    }
+
+    predicate keyLive(store: seq<StoreEntry>, k: Key, now: Time)
+    {
+        var idx := FindIndex(store, k);
+        idx >= 0 && isLive(store[idx], now)
+    }
+
+    predicate keyDead(store: seq<StoreEntry>, k: Key, now: Time)
+    {
+        var idx := FindIndex(store, k);
+        idx == -1 || !isLive(store[idx], now)
     }
 }
 
 module Abstraction {
     import opened Types
 
-    ghost function setToSeq(s: set<Key>): seq<Key>
-        ensures forall k :: k in s <==> k in setToSeq(s)
-        ensures |setToSeq(s)| == |s|
+    ghost function Map(store: seq<StoreEntry>, now: Time): map<Key, Value>
+        decreases |store|
     {
-        if s == {} then
-            []
-        else
-            var x :| x in s; 
-            [x] + setToSeq(s - {x})
-    }
-
-    ghost function MapHelper(store: map<Key, Entry>, keys: seq<Key>, now: Time): map<Key, Value>
-        decreases |keys|
-    {
-        if |keys| == 0 then
+        if |store| == 0 then
             map[]
         else
-            var k := keys[0];
-            var rest := MapHelper(store, keys[1..], now);
-            if k in store && isLive(store[k], now) then
-                rest[k := store[k].val]
+            var e := store[0];
+            var rest := Map(store[1..], now);
+            if isLive(e, now) then
+                rest[e.key := e.val]
             else
                 rest
     }
 
-    ghost function Map(store: map<Key, Entry>, now: Time): map<Key, Value>
-    {
-        MapHelper(store, setToSeq(store.Keys), now)
-    }
-
-    lemma isInMap(store: map<Key, Entry>, k: Key, now: Time)
-        requires k in store
-        requires isLive(store[k], now)
+    lemma isInMap(store: seq<StoreEntry>, k: Key, now: Time)
+        requires UniqueKeys(store)
+        requires FindIndex(store, k) >= 0
+        requires isLive(store[FindIndex(store, k)], now)
         ensures k in Map(store, now)
-        ensures Map(store, now)[k] == store[k].val
+        ensures Map(store, now)[k] == store[FindIndex(store, k)].val
+        decreases |store|
     {
-        var keys := setToSeq(store.Keys);
-        isInMapHelper(store, keys, k, now);
-    }
-
-    lemma isInMapHelper(store: map<Key, Entry>, keys: seq<Key>, k: Key, now: Time)
-        requires k in keys
-        requires k in store
-        requires isLive(store[k], now)
-        ensures k in MapHelper(store, keys, now)
-        ensures MapHelper(store, keys, now)[k] == store[k].val
-        decreases |keys|
-    {
-        if |keys| == 0 {
+        if |store| == 0 {
             assert false;
-        } else if keys[0] == k {
-            var rest := MapHelper(store, keys[1..], now);
         } else {
-            assert k in keys[1..];
-            isInMapHelper(store, keys[1..], k, now);
-        }
-    }
-
-    lemma notInMap(store: map<Key, Entry>, k: Key, now: Time)
-        requires k !in store || !isLive(store[k], now)
-        ensures k !in Map(store, now)
-    {
-        var keys := setToSeq(store.Keys);
-        notInMapHelper(store, keys, k, now);
-    }
-
-    lemma notInMapHelper(store: map<Key, Entry>, keys: seq<Key>, k: Key, now: Time)
-        requires k !in store || !isLive(store[k], now)
-        ensures k !in MapHelper(store, keys, now)
-        decreases |keys|
-    {
-        if |keys| == 0 {
-        } else {
-            var first := keys[0];
-            var rest := MapHelper(store, keys[1..], now);
-            notInMapHelper(store, keys[1..], k, now);
-            if first in store && isLive(store[first], now) {
-                if first == k {
-                    assert false;
-                }
+            var e := store[0];
+            var rest := Map(store[1..], now);
+            var idx := FindIndex(store, k);
+            if e.key == k {
+                assert idx == 0;
+                assert isLive(e, now);
+            } else {
+                assert idx > 0;
+                UniqueKeysTail(store);
+                FindIndexTail(store, k);
+                isInMap(store[1..], k, now);
             }
         }
     }
 
-    lemma inMapIff(store: map<Key, Entry>, k: Key, now: Time)
-        ensures k in Map(store, now) <==> (k in store && isLive(store[k], now))
+    lemma notInMap(store: seq<StoreEntry>, k: Key, now: Time)
+        requires UniqueKeys(store)
+        requires FindIndex(store, k) == -1 || !isLive(store[FindIndex(store, k)], now)
+        ensures k !in Map(store, now)
+        decreases |store|
     {
-        if k in store && isLive(store[k], now) {
+        if |store| == 0 {
+        } else {
+            var e := store[0];
+            var rest := Map(store[1..], now);
+            UniqueKeysTail(store);
+            var idx := FindIndex(store, k);
+            if e.key == k {
+                assert idx == 0;
+                assert !isLive(e, now);
+                notInMapTail(store[1..], k, now);
+            } else {
+                FindIndexTail(store, k);
+                notInMap(store[1..], k, now);
+            }
+        }
+    }
+
+    lemma notInMapTail(store: seq<StoreEntry>, k: Key, now: Time)
+        requires UniqueKeys(store)
+        requires FindIndex(store, k) == -1
+        ensures k !in Map(store, now)
+        decreases |store|
+    {
+        if |store| == 0 {
+        } else {
+            UniqueKeysTail(store);
+            FindIndexTail(store, k);
+            notInMapTail(store[1..], k, now);
+        }
+    }
+
+    lemma inMapIff(store: seq<StoreEntry>, k: Key, now: Time)
+        requires UniqueKeys(store)
+        ensures k in Map(store, now) <==> (FindIndex(store, k) >= 0 && isLive(store[FindIndex(store, k)], now))
+    {
+        var idx := FindIndex(store, k);
+        if idx >= 0 && isLive(store[idx], now) {
             isInMap(store, k, now);
         } else {
             notInMap(store, k, now);
+        }
+    }
+
+    lemma UniqueKeysTail(store: seq<StoreEntry>)
+        requires |store| > 0
+        requires UniqueKeys(store)
+        ensures UniqueKeys(store[1..])
+    {
+        forall i, j | 0 <= i < j < |store[1..]|
+            ensures store[1..][i].key != store[1..][j].key
+        {
+            assert store[1..][i] == store[i+1];
+            assert store[1..][j] == store[j+1];
+        }
+    }
+
+    lemma FindIndexTail(store: seq<StoreEntry>, k: Key)
+        requires |store| > 0
+        requires store[0].key != k
+        ensures FindIndex(store, k) == if FindIndex(store[1..], k) == -1 then -1 else FindIndex(store[1..], k) + 1
+        ensures FindIndex(store[1..], k) >= 0 ==> store[1..][FindIndex(store[1..], k)] == store[FindIndex(store, k)]
+    {
+        // FindIndex(store, k) starts at index 0, but store[0].key != k
+        // So it recurses to FindIndexHelper(store, k, 1)
+        // FindIndex(store[1..], k) = FindIndexHelper(store[1..], k, 0)
+        // These are equivalent modulo index offset
+        assert FindIndex(store, k) == FindIndexHelper(store, k, 0);
+        assert store[0].key != k;
+        assert FindIndex(store, k) == FindIndexHelper(store, k, 1);
+        
+        // Prove the relationship by induction on |store| - handled by Dafny
+        FindIndexTailHelper(store, k, 0);
+    }
+    
+    lemma FindIndexTailHelper(store: seq<StoreEntry>, k: Key, start: nat)
+        requires |store| > 0
+        requires start < |store|
+        requires store[0].key != k
+        ensures FindIndexHelper(store, k, start + 1) == 
+                if FindIndexHelper(store[1..], k, start) == -1 then -1 
+                else FindIndexHelper(store[1..], k, start) + 1
+        decreases |store| - start
+    {
+        if start + 1 >= |store| {
+            assert FindIndexHelper(store, k, start + 1) == -1;
+            assert start >= |store[1..]|;
+            assert FindIndexHelper(store[1..], k, start) == -1;
+        } else if store[start + 1].key == k {
+            assert store[1..][start].key == store[start + 1].key == k;
+            assert FindIndexHelper(store, k, start + 1) == start + 1;
+            assert FindIndexHelper(store[1..], k, start) == start;
+        } else {
+            assert store[1..][start].key == store[start + 1].key != k;
+            FindIndexTailHelper(store, k, start + 1);
         }
     }
 }
@@ -124,59 +200,399 @@ module Helpers {
     import opened Types
     import opened Abstraction
 
-    lemma updateKeyOthersIntact(store: map<Key, Entry>, k: Key, e: Entry, other: Key, now: Time)
-        requires k != other
-        ensures (other in Map(store[k := e], now)) == (other in Map(store, now))
-        ensures other in Map(store, now) ==> Map(store[k := e], now)[other] == Map(store, now)[other]
+    function seqRemove<T>(s: seq<T>, idx: int): seq<T>
+        requires 0 <= idx < |s|
+        ensures |seqRemove(s, idx)| == |s| - 1
     {
-        var newStore := store[k := e];
-        assert (other in store && isLive(store[other], now)) == 
-               (other in newStore && isLive(newStore[other], now));
+        s[..idx] + s[idx+1..]
+    }
+
+    lemma UniqueKeysAfterUpdate(store: seq<StoreEntry>, idx: int, e: StoreEntry)
+        requires UniqueKeys(store)
+        requires 0 <= idx < |store|
+        requires e.key == store[idx].key
+        ensures UniqueKeys(store[idx := e])
+    {
+        var newStore := store[idx := e];
+        forall i, j | 0 <= i < j < |newStore|
+            ensures newStore[i].key != newStore[j].key
+        {
+            if i == idx {
+                assert newStore[i].key == e.key == store[idx].key;
+                assert newStore[j].key == store[j].key;
+            } else if j == idx {
+                assert newStore[i].key == store[i].key;
+                assert newStore[j].key == e.key == store[idx].key;
+            } else {
+                assert newStore[i].key == store[i].key;
+                assert newStore[j].key == store[j].key;
+            }
+        }
+    }
+
+    lemma UniqueKeysAfterAppend(store: seq<StoreEntry>, e: StoreEntry)
+        requires UniqueKeys(store)
+        requires FindIndex(store, e.key) == -1
+        ensures UniqueKeys(store + [e])
+    {
+        var newStore := store + [e];
+        forall i, j | 0 <= i < j < |newStore|
+            ensures newStore[i].key != newStore[j].key
+        {
+            if j == |store| {
+                assert newStore[j].key == e.key;
+                assert newStore[i].key == store[i].key;
+                assert store[i].key != e.key;
+            } else {
+                assert newStore[i].key == store[i].key;
+                assert newStore[j].key == store[j].key;
+            }
+        }
+    }
+
+    lemma UniqueKeysAfterRemove(store: seq<StoreEntry>, idx: int)
+        requires UniqueKeys(store)
+        requires 0 <= idx < |store|
+        ensures UniqueKeys(seqRemove(store, idx))
+    {
+        var newStore := seqRemove(store, idx);
+        forall i, j | 0 <= i < j < |newStore|
+            ensures newStore[i].key != newStore[j].key
+        {
+            var oi := if i < idx then i else i + 1;
+            var oj := if j < idx then j else j + 1;
+            assert newStore[i].key == store[oi].key;
+            assert newStore[j].key == store[oj].key;
+        }
+    }
+
+    lemma FindIndexAfterUpdate(store: seq<StoreEntry>, idx: int, e: StoreEntry, k: Key)
+        requires UniqueKeys(store)
+        requires 0 <= idx < |store|
+        requires e.key == store[idx].key
+        ensures FindIndex(store[idx := e], k) == FindIndex(store, k)
+    {
+        var newStore := store[idx := e];
+        UniqueKeysAfterUpdate(store, idx, e);
+        if FindIndex(store, k) >= 0 {
+            var i := FindIndex(store, k);
+            assert newStore[i].key == if i == idx then e.key else store[i].key;
+            assert newStore[i].key == store[i].key == k;
+        }
+    }
+
+    lemma FindIndexAfterAppend(store: seq<StoreEntry>, e: StoreEntry, k: Key)
+        requires UniqueKeys(store)
+        requires FindIndex(store, e.key) == -1
+        ensures FindIndex(store + [e], k) == if k == e.key then |store| else FindIndex(store, k)
+    {
+        var newStore := store + [e];
+        UniqueKeysAfterAppend(store, e);
+        FindIndexAfterAppendHelper(store, e, k, 0);
+    }
+    
+    lemma FindIndexAfterAppendHelper(store: seq<StoreEntry>, e: StoreEntry, k: Key, start: nat)
+        requires start <= |store|
+        requires UniqueKeys(store)
+        requires FindIndex(store, e.key) == -1
+        ensures FindIndexHelper(store + [e], k, start) == 
+                if k == e.key then 
+                    if FindIndexHelper(store, k, start) == -1 then |store| else FindIndexHelper(store, k, start)
+                else FindIndexHelper(store, k, start)
+        decreases |store| - start
+    {
+        var newStore := store + [e];
+        if start >= |store| {
+            // At the appended element
+            if k == e.key {
+                assert newStore[start] == e;
+                assert newStore[start].key == k;
+                assert FindIndexHelper(newStore, k, start) == start;
+            } else {
+                assert newStore[start].key != k;
+                assert FindIndexHelper(newStore, k, start + 1) == -1;
+            }
+        } else if store[start].key == k {
+            assert newStore[start].key == k;
+        } else {
+            FindIndexAfterAppendHelper(store, e, k, start + 1);
+        }
+    }
+
+    lemma updateKeyOthersIntact(store: seq<StoreEntry>, idx: int, e: StoreEntry, other: Key, now: Time)
+        requires UniqueKeys(store)
+        requires 0 <= idx < |store|
+        requires e.key == store[idx].key
+        requires e.key != other
+        ensures (other in Map(store[idx := e], now)) == (other in Map(store, now))
+        ensures other in Map(store, now) ==> Map(store[idx := e], now)[other] == Map(store, now)[other]
+    {
+        var newStore := store[idx := e];
+        UniqueKeysAfterUpdate(store, idx, e);
+        FindIndexAfterUpdate(store, idx, e, other);
         inMapIff(store, other, now);
         inMapIff(newStore, other, now);
         if other in Map(store, now) {
             isInMap(store, other, now);
             isInMap(newStore, other, now);
+            MapUpdatePreservesOther(store, idx, e, other, now);
         }
     }
 
-    function mapRemove(m: map<Key, Entry>, k: Key): map<Key, Entry>
+    lemma MapUpdatePreservesOther(store: seq<StoreEntry>, idx: int, e: StoreEntry, other: Key, now: Time)
+        requires UniqueKeys(store)
+        requires 0 <= idx < |store|
+        requires e.key == store[idx].key
+        requires e.key != other
+        requires FindIndex(store, other) >= 0
+        requires isLive(store[FindIndex(store, other)], now)
+        ensures other in Map(store, now)
+        ensures other in Map(store[idx := e], now)
+        ensures Map(store[idx := e], now)[other] == Map(store, now)[other]
+        decreases |store|
     {
-        map k' | k' in m && k' != k :: m[k']
+        var newStore := store[idx := e];
+        UniqueKeysAfterUpdate(store, idx, e);
+        isInMap(store, other, now);
+        FindIndexAfterUpdate(store, idx, e, other);
+        if |store| == 0 {
+        } else {
+            var se := store[0];
+            var ne := newStore[0];
+            if idx == 0 {
+                UniqueKeysTail(store);
+                UniqueKeysTail(newStore);
+                assert newStore[1..] == store[1..];
+            } else {
+                UniqueKeysTail(store);
+                UniqueKeysTail(newStore);
+                assert newStore[1..] == store[1..][idx-1 := e];
+                if se.key == other {
+                } else {
+                    FindIndexTail(store, other);
+                    MapUpdatePreservesOther(store[1..], idx-1, e, other, now);
+                }
+            }
+        }
     }
 
-    lemma removeKeyOthersIntact(store: map<Key, Entry>, k: Key, other: Key, now: Time)
-        requires k in store
-        requires k != other
-        ensures (other in Map(mapRemove(store, k), now)) == (other in Map(store, now))
-        ensures other in Map(store, now) ==> Map(mapRemove(store, k), now)[other] == Map(store, now)[other]
+    lemma appendKeyOthersIntact(store: seq<StoreEntry>, e: StoreEntry, other: Key, now: Time)
+        requires UniqueKeys(store)
+        requires FindIndex(store, e.key) == -1
+        requires e.key != other
+        ensures (other in Map(store + [e], now)) == (other in Map(store, now))
+        ensures other in Map(store, now) ==> Map(store + [e], now)[other] == Map(store, now)[other]
     {
-        var newStore := mapRemove(store, k);
+        var newStore := store + [e];
+        UniqueKeysAfterAppend(store, e);
+        FindIndexAfterAppend(store, e, other);
         inMapIff(store, other, now);
         inMapIff(newStore, other, now);
         if other in Map(store, now) {
             isInMap(store, other, now);
             isInMap(newStore, other, now);
+            MapAppendPreservesOther(store, e, other, now);
         }
     }
 
-    lemma updateKey(store: map<Key, Entry>, k: Key, e: Entry, now: Time)
+    lemma MapAppendPreservesOther(store: seq<StoreEntry>, e: StoreEntry, other: Key, now: Time)
+        requires UniqueKeys(store)
+        requires FindIndex(store, e.key) == -1
+        requires e.key != other
+        requires FindIndex(store, other) >= 0
+        requires isLive(store[FindIndex(store, other)], now)
+        ensures other in Map(store, now)
+        ensures other in Map(store + [e], now)
+        ensures Map(store + [e], now)[other] == Map(store, now)[other]
+        decreases |store|
+    {
+        var newStore := store + [e];
+        UniqueKeysAfterAppend(store, e);
+        isInMap(store, other, now);
+        FindIndexAfterAppend(store, e, other);
+        if |store| == 0 {
+        } else {
+            var se := store[0];
+            UniqueKeysTail(store);
+            assert newStore[1..] == store[1..] + [e];
+            if se.key == other {
+                isInMap(newStore, other, now);
+            } else {
+                FindIndexTail(store, other);
+                FindIndexTail(store, e.key);
+                MapAppendPreservesOther(store[1..], e, other, now);
+            }
+        }
+    }
+
+    lemma removeKeyOthersIntact(store: seq<StoreEntry>, idx: int, other: Key, now: Time)
+        requires UniqueKeys(store)
+        requires 0 <= idx < |store|
+        requires store[idx].key != other
+        ensures (other in Map(seqRemove(store, idx), now)) == (other in Map(store, now))
+        ensures other in Map(store, now) ==> Map(seqRemove(store, idx), now)[other] == Map(store, now)[other]
+    {
+        var newStore := seqRemove(store, idx);
+        UniqueKeysAfterRemove(store, idx);
+        FindIndexAfterRemove(store, idx, other);
+        inMapIff(store, other, now);
+        inMapIff(newStore, other, now);
+        if other in Map(store, now) {
+            isInMap(store, other, now);
+            isInMap(newStore, other, now);
+            MapRemovePreservesOther(store, idx, other, now);
+        }
+    }
+
+    lemma FindIndexAfterRemove(store: seq<StoreEntry>, idx: int, k: Key)
+        requires UniqueKeys(store)
+        requires 0 <= idx < |store|
+        requires store[idx].key != k
+        ensures var newStore := seqRemove(store, idx);
+                var oldIdx := FindIndex(store, k);
+                FindIndex(newStore, k) == if oldIdx == -1 then -1 else if oldIdx < idx then oldIdx else oldIdx - 1
+    {
+        var newStore := seqRemove(store, idx);
+        UniqueKeysAfterRemove(store, idx);
+        var oldIdx := FindIndex(store, k);
+        if oldIdx == -1 {
+            // k not in store, so not in newStore either
+            forall i | 0 <= i < |newStore|
+                ensures newStore[i].key != k
+            {
+                var oi := if i < idx then i else i + 1;
+                assert newStore[i] == store[oi];
+            }
+        } else if oldIdx < idx {
+            // k is before the removed element
+            assert newStore[oldIdx] == store[oldIdx];
+            assert newStore[oldIdx].key == k;
+        } else {
+            // k is after the removed element (oldIdx > idx since store[idx].key != k)
+            assert oldIdx > idx;
+            assert newStore[oldIdx - 1] == store[oldIdx];
+            assert newStore[oldIdx - 1].key == k;
+        }
+    }
+
+    lemma MapRemovePreservesOther(store: seq<StoreEntry>, idx: int, other: Key, now: Time)
+        requires UniqueKeys(store)
+        requires 0 <= idx < |store|
+        requires store[idx].key != other
+        requires FindIndex(store, other) >= 0
+        requires isLive(store[FindIndex(store, other)], now)
+        ensures other in Map(store, now)
+        ensures other in Map(seqRemove(store, idx), now)
+        ensures Map(seqRemove(store, idx), now)[other] == Map(store, now)[other]
+        decreases |store|
+    {
+        var newStore := seqRemove(store, idx);
+        UniqueKeysAfterRemove(store, idx);
+        isInMap(store, other, now);
+        FindIndexAfterRemove(store, idx, other);
+        if |store| == 0 {
+        } else if idx == 0 {
+            assert newStore == store[1..];
+            UniqueKeysTail(store);
+            if store[0].key == other {
+                assert false;
+            }
+            isInMap(newStore, other, now);
+        } else {
+            var se := store[0];
+            UniqueKeysTail(store);
+            assert newStore == [se] + seqRemove(store[1..], idx - 1);
+            if se.key == other {
+                isInMap(newStore, other, now);
+            } else {
+                FindIndexTail(store, other);
+                FindIndexAfterRemoveTail(store, idx, se.key);
+                MapRemovePreservesOther(store[1..], idx - 1, other, now);
+                MapPrependPreserves(se, seqRemove(store[1..], idx - 1), other, now);
+            }
+        }
+    }
+    
+    lemma FindIndexAfterRemoveTail(store: seq<StoreEntry>, idx: int, k: Key)
+        requires UniqueKeys(store)
+        requires |store| > 0
+        requires 0 < idx < |store|
+        requires store[0].key == k
+        ensures FindIndex(seqRemove(store[1..], idx - 1), k) == -1
+    {
+        var tail := store[1..];
+        var newTail := seqRemove(tail, idx - 1);
+        UniqueKeysTail(store);
+        UniqueKeysAfterRemove(tail, idx - 1);
+        // k is at store[0], but tail = store[1..] doesn't contain k (UniqueKeys)
+        forall i | 0 <= i < |tail|
+            ensures tail[i].key != k
+        {
+            assert tail[i] == store[i + 1];
+            // store[0].key == k and UniqueKeys means store[i+1].key != k for i+1 > 0
+        }
+        // newTail is a subset of tail, so also doesn't contain k
+        forall i | 0 <= i < |newTail|
+            ensures newTail[i].key != k
+        {
+            var oi := if i < idx - 1 then i else i + 1;
+            assert newTail[i] == tail[oi];
+        }
+    }
+
+    lemma MapPrependPreserves(e: StoreEntry, store: seq<StoreEntry>, k: Key, now: Time)
+        requires UniqueKeys(store)
+        requires e.key != k
+        requires FindIndex(store, e.key) == -1
+        requires k in Map(store, now)
+        ensures Map([e] + store, now)[k] == Map(store, now)[k]
+    {
+        var newStore := [e] + store;
+        assert newStore[0] == e;
+        assert newStore[1..] == store;
+    }
+
+    lemma updateKey(store: seq<StoreEntry>, idx: int, e: StoreEntry, now: Time)
+        requires UniqueKeys(store)
+        requires 0 <= idx < |store|
+        requires e.key == store[idx].key
         requires isLive(e, now)
-        ensures k in Map(store[k := e], now)
-        ensures Map(store[k := e], now)[k] == e.val
+        ensures e.key in Map(store[idx := e], now)
+        ensures Map(store[idx := e], now)[e.key] == e.val
     {
-        var newStore := store[k := e];
-        assert k in newStore;
-        assert isLive(newStore[k], now);
-        isInMap(newStore, k, now);
+        var newStore := store[idx := e];
+        UniqueKeysAfterUpdate(store, idx, e);
+        FindIndexAfterUpdate(store, idx, e, e.key);
+        assert FindIndex(newStore, e.key) == idx;
+        assert newStore[idx] == e;
+        assert isLive(newStore[FindIndex(newStore, e.key)], now);
+        isInMap(newStore, e.key, now);
     }
 
-    lemma removeKey(store: map<Key, Entry>, k: Key, now: Time)
-        requires k in store
-        ensures k !in Map(mapRemove(store, k), now)
+    lemma appendKey(store: seq<StoreEntry>, e: StoreEntry, now: Time)
+        requires UniqueKeys(store)
+        requires FindIndex(store, e.key) == -1
+        requires isLive(e, now)
+        ensures e.key in Map(store + [e], now)
+        ensures Map(store + [e], now)[e.key] == e.val
     {
-        var newStore := mapRemove(store, k);
-        assert k !in newStore;
+        var newStore := store + [e];
+        UniqueKeysAfterAppend(store, e);
+        FindIndexAfterAppend(store, e, e.key);
+        assert FindIndex(newStore, e.key) == |store|;
+        assert newStore[|store|] == e;
+        isInMap(newStore, e.key, now);
+    }
+
+    lemma removeKey(store: seq<StoreEntry>, idx: int, now: Time)
+        requires UniqueKeys(store)
+        requires 0 <= idx < |store|
+        ensures store[idx].key !in Map(seqRemove(store, idx), now)
+    {
+        var k := store[idx].key;
+        var newStore := seqRemove(store, idx);
+        UniqueKeysAfterRemove(store, idx);
+        assert FindIndex(newStore, k) == -1;
         notInMap(newStore, k, now);
     }
 }
@@ -187,98 +603,145 @@ module CacheImpl {
     import opened Helpers
 
     class Cache {
-        var store: map<Key, Entry>
+        var store: seq<StoreEntry>
+
+        ghost predicate Valid()
+            reads this
+        {
+            UniqueKeys(store)
+        }
 
         ghost function view(now: Time): map<Key, Value>
             reads this
+            requires Valid()
         {
             Map(store, now)
         }
 
         constructor()
-            ensures store == map[]
+            ensures store == []
+            ensures Valid()
             ensures forall now: Time :: view(now) == map[]
         {
-            store := map[];
+            store := [];
         }
 
         method Get(k: Key, now: Time) returns (result: Option<Value>)
+            requires Valid()
+            ensures Valid()
             ensures result.Some? <==> k in view(now)
             ensures result.Some? ==> result.value == view(now)[k]
-            ensures result.Some? ==> k in store
-            ensures result.Some? ==> result.value == store[k].val
             ensures store == old(store)
         {
+            var idx := ScanForKey(k);
             inMapIff(store, k, now);
-            if k in store && isLive(store[k], now) {
+            if idx >= 0 && isLive(store[idx], now) {
                 isInMap(store, k, now);
-                result := Some(store[k].val);
+                result := Some(store[idx].val);
             } else {
                 notInMap(store, k, now);
                 result := None;
             }
         }
 
+        method ScanForKey(k: Key) returns (idx: int)
+            requires Valid()
+            ensures idx == FindIndex(store, k)
+            ensures -1 <= idx < |store|
+            ensures idx >= 0 ==> store[idx].key == k
+            ensures idx == -1 ==> forall i :: 0 <= i < |store| ==> store[i].key != k
+        {
+            idx := 0;
+            while idx < |store|
+                invariant 0 <= idx <= |store|
+                invariant forall i :: 0 <= i < idx ==> store[i].key != k
+            {
+                if store[idx].key == k {
+                    return idx;
+                }
+                idx := idx + 1;
+            }
+            idx := -1;
+        }
+
         method Set(k: Key, v: Value, ttl: Time, now: Time)
             requires ttl > 0
+            requires Valid()
             modifies this
+            ensures Valid()
             ensures k in view(now)
             ensures view(now)[k] == v
             ensures forall other: Key :: other != k ==>
                 ((other in view(now)) == (other in old(view(now)))) &&
                 (other in old(view(now)) ==> view(now)[other] == old(view(now))[other])
-            ensures k in store
-            ensures store[k].val == v
-            ensures store[k].exp == now + ttl
-            ensures forall other: Key :: other != k ==>
-                (other in store <==> other in old(store)) &&
-                (other in old(store) ==> store[other] == old(store)[other])
         {
-            var entry := Entry(v, now + ttl);
+            var entry := StoreEntry(k, v, now + ttl);
             ghost var oldStore := store;
-            store := store[k := entry];
+            var idx := ScanForKey(k);
             
-            assert isLive(store[k], now);
-            updateKey(oldStore, k, entry, now);
-            
-            forall other: Key | other != k
-                ensures (other in view(now)) == (other in Map(oldStore, now))
-                ensures other in Map(oldStore, now) ==> view(now)[other] == Map(oldStore, now)[other]
-            {
-                updateKeyOthersIntact(oldStore, k, entry, other, now);
+            if idx >= 0 {
+                store := store[idx := entry];
+                assert isLive(store[idx], now);
+                updateKey(oldStore, idx, entry, now);
+                
+                forall other: Key | other != k
+                    ensures (other in view(now)) == (other in Map(oldStore, now))
+                    ensures other in Map(oldStore, now) ==> view(now)[other] == Map(oldStore, now)[other]
+                {
+                    updateKeyOthersIntact(oldStore, idx, entry, other, now);
+                }
+            } else {
+                store := store + [entry];
+                assert isLive(store[|store|-1], now);
+                appendKey(oldStore, entry, now);
+                
+                forall other: Key | other != k
+                    ensures (other in view(now)) == (other in Map(oldStore, now))
+                    ensures other in Map(oldStore, now) ==> view(now)[other] == Map(oldStore, now)[other]
+                {
+                    appendKeyOthersIntact(oldStore, entry, other, now);
+                }
             }
         }
 
         method Add(k: Key, v: Value, ttl: Time, now: Time) returns (success: bool)
             requires ttl > 0
+            requires Valid()
             modifies this
+            ensures Valid()
             ensures success <==> k !in old(view(now))
             ensures success ==> k in view(now) && view(now)[k] == v
             ensures !success ==> view(now) == old(view(now))
             ensures forall other: Key :: other != k ==>
                 ((other in view(now)) == (other in old(view(now)))) &&
                 (other in old(view(now)) ==> view(now)[other] == old(view(now))[other])
-            ensures success ==> k in store
-            ensures success ==> store[k].val == v
-            ensures success ==> store[k].exp == now + ttl
             ensures !success ==> store == old(store)
-            ensures forall other: Key :: other != k ==>
-                (other in store <==> other in old(store)) &&
-                (other in old(store) ==> store[other] == old(store)[other])
         {
+            var idx := ScanForKey(k);
             inMapIff(store, k, now);
-            if k in store && isLive(store[k], now) {
+            if idx >= 0 && isLive(store[idx], now) {
                 success := false;
             } else {
-                var entry := Entry(v, now + ttl);
+                var entry := StoreEntry(k, v, now + ttl);
                 ghost var oldStore := store;
-                store := store[k := entry];
-                updateKey(oldStore, k, entry, now);
-                forall other: Key | other != k
-                    ensures (other in view(now)) == (other in Map(oldStore, now))
-                    ensures other in Map(oldStore, now) ==> view(now)[other] == Map(oldStore, now)[other]
-                {
-                    updateKeyOthersIntact(oldStore, k, entry, other, now);
+                if idx >= 0 {
+                    store := store[idx := entry];
+                    updateKey(oldStore, idx, entry, now);
+                    forall other: Key | other != k
+                        ensures (other in view(now)) == (other in Map(oldStore, now))
+                        ensures other in Map(oldStore, now) ==> view(now)[other] == Map(oldStore, now)[other]
+                    {
+                        updateKeyOthersIntact(oldStore, idx, entry, other, now);
+                    }
+                } else {
+                    store := store + [entry];
+                    appendKey(oldStore, entry, now);
+                    forall other: Key | other != k
+                        ensures (other in view(now)) == (other in Map(oldStore, now))
+                        ensures other in Map(oldStore, now) ==> view(now)[other] == Map(oldStore, now)[other]
+                    {
+                        appendKeyOthersIntact(oldStore, entry, other, now);
+                    }
                 }
                 success := true;
             }
@@ -286,32 +749,29 @@ module CacheImpl {
 
         method Replace(k: Key, v: Value, ttl: Time, now: Time) returns (success: bool)
             requires ttl > 0
+            requires Valid()
             modifies this
+            ensures Valid()
             ensures success <==> k in old(view(now))
             ensures success ==> k in view(now) && view(now)[k] == v
             ensures !success ==> view(now) == old(view(now))
             ensures forall other: Key :: other != k ==>
                 ((other in view(now)) == (other in old(view(now)))) &&
                 (other in old(view(now)) ==> view(now)[other] == old(view(now))[other])
-            ensures success ==> k in store
-            ensures success ==> store[k].val == v
-            ensures success ==> store[k].exp == now + ttl
             ensures !success ==> store == old(store)
-            ensures forall other: Key :: other != k ==>
-                (other in store <==> other in old(store)) &&
-                (other in old(store) ==> store[other] == old(store)[other])
         {
+            var idx := ScanForKey(k);
             inMapIff(store, k, now);
-            if k in store && isLive(store[k], now) {
-                var entry := Entry(v, now + ttl);
+            if idx >= 0 && isLive(store[idx], now) {
+                var entry := StoreEntry(k, v, now + ttl);
                 ghost var oldStore := store;
-                store := store[k := entry];
-                updateKey(oldStore, k, entry, now);
+                store := store[idx := entry];
+                updateKey(oldStore, idx, entry, now);
                 forall other: Key | other != k
                     ensures (other in view(now)) == (other in Map(oldStore, now))
                     ensures other in Map(oldStore, now) ==> view(now)[other] == Map(oldStore, now)[other]
                 {
-                    updateKeyOthersIntact(oldStore, k, entry, other, now);
+                    updateKeyOthersIntact(oldStore, idx, entry, other, now);
                 }
                 success := true;
             } else {
@@ -320,28 +780,27 @@ module CacheImpl {
         }
 
         method Delete(k: Key, now: Time) returns (found: bool)
+            requires Valid()
             modifies this
+            ensures Valid()
             ensures found <==> k in old(view(now))
             ensures k !in view(now)
             ensures forall other: Key :: other != k ==>
                 ((other in view(now)) == (other in old(view(now)))) &&
                 (other in old(view(now)) ==> view(now)[other] == old(view(now))[other])
-            ensures k !in store
-            ensures forall other: Key :: other != k ==>
-                (other in store <==> other in old(store)) &&
-                (other in old(store) ==> store[other] == old(store)[other])
         {
+            var idx := ScanForKey(k);
             inMapIff(store, k, now);
-            found := k in store && isLive(store[k], now);
-            if k in store {
+            found := idx >= 0 && isLive(store[idx], now);
+            if idx >= 0 {
                 ghost var oldStore := store;
-                store := mapRemove(store, k);
-                removeKey(oldStore, k, now);
+                store := seqRemove(store, idx);
+                removeKey(oldStore, idx, now);
                 forall other: Key | other != k
                     ensures (other in view(now)) == (other in Map(oldStore, now))
                     ensures other in Map(oldStore, now) ==> view(now)[other] == Map(oldStore, now)[other]
                 {
-                    removeKeyOthersIntact(oldStore, k, other, now);
+                    removeKeyOthersIntact(oldStore, idx, other, now);
                 }
             } else {
                 notInMap(store, k, now);
@@ -484,7 +943,9 @@ module Commands {
 
     method Execute(cache: Cache, cmd: Command, now: Time) returns (resp: Response)
         requires ValidCmd(cmd)
+        requires cache.Valid()
         modifies cache
+        ensures cache.Valid()
         ensures cmd.CmdInvalid? ==> resp.RespError?
         ensures cmd.CmdSet? ==> resp == RespStored
         ensures cmd.CmdDelete? ==> resp == RespDeleted
@@ -568,7 +1029,9 @@ module Commands {
 
     // parse, execute, format
     method ProcessCommand(cache: Cache, input: string, now: Time) returns (output: string)
+        requires cache.Valid()
         modifies cache
+        ensures cache.Valid()
     {
         var cmd := ParseCommand(input);
         ParseCommandValid(input);
@@ -586,6 +1049,7 @@ module CommandTests {
     method TestExecuteCommands()
     {
         var cache := new Cache();
+        assert cache.Valid();
         
         // Set always stores
         var resp := Execute(cache, CmdSet(1, 42, 50), 100);
