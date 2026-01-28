@@ -1,0 +1,363 @@
+Dafny 4.11.0.0 — Master Documentation (Based on Dafny Reference Manual v4.11.0 and Dafny FAQ)
+
+Scope and Source Coverage
+- Derived from Dafny Reference Manual v4.11.0 (DafnyRef) and Dafny FAQ (GitHub wiki).
+- The Google Docs source requires authentication and was not accessible in this environment. Its content is not included.
+- This document compresses the full language model into a practical, error‑resistant reference.
+
+0) Mental Model: What Dafny Is
+- Language with built‑in specification constructs and a verifier/compiler tool.
+- Verification is sound but incomplete.
+  - If verification succeeds, the program satisfies its specification (modulo tool bugs).
+  - If verification fails, the program may still be correct.
+- Tool pipeline: parse → resolve → verify (Boogie + Z3) → translate → build/run.
+- Verification is modular: callers use only callee specifications.
+
+1) Lexical, Tokens, and Parsing
+1.1 Input
+- UTF‑8. ASCII identifiers. Unicode allowed in strings and comments.
+
+1.2 Tokens
+- Four character classes: whitespace, alphanumerics, punctuation, operators.
+- Tokens do not mix classes; whitespace only separates tokens.
+
+1.3 Comments and Doc Comments
+- // single‑line, /* ... */ block, /** ... */ doc‑style.
+- Doc comments attach to declarations and are used by IDEs.
+
+1.4 Reserved Words and Special Tokens
+- Keywords include: module, class, trait, datatype, newtype, type, method, function, predicate, lemma, ghost, static, returns, requires, ensures, modifies, reads, decreases, invariant, forall, exists, assert, assume, reveal, old, fresh, unchanged, etc.
+- arrayN and bvN are reserved tokens (array2, array3, bv32, etc.).
+
+2) Program Structure and Name Resolution
+2.1 Files and Includes
+- Source files: .dfy
+- include "File.dfy" adds parse and resolve scope. Included files are verified only if requested.
+
+2.2 Top‑Level Declarations
+- modules, classes, traits, datatypes, newtypes, types (synonym/abstract/subset), iterators.
+- methods, functions, predicates, lemmas, consts.
+
+2.3 Module System
+- Module definitions, imports, opens, and export sets.
+- Export sets control visibility:
+  - provides: signature only.
+  - reveals: body/definition.
+- Abstract modules and refinement support interface‑implementation separation.
+
+2.4 Ordering and Dependencies
+- Modules and imports must be acyclic.
+- Imports and submodules are considered before enclosing module contents.
+
+2.5 Name Resolution Rules (Essentials)
+- Expression context resolves locals, parameters, members, then modules.
+- Type context resolves type parameters, then module members.
+- Explicit qualification (Module.Name, this.field) removes ambiguity.
+
+3) Types: Full Shape of the Type System
+3.1 Value vs Reference
+- Value types are immutable values; reference types are heap objects.
+- Nullable reference types allow null; non‑nullable exclude null.
+
+3.2 Basic Types
+- bool, int, nat (int >= 0), real, char, ORDINAL, bvN.
+- Numeric precedence: * / % > + - > shifts > relations.
+- Implication `==>` is right‑associative and short‑circuiting.
+
+3.3 Collections
+- set<T>, iset<T> (infinite), multiset<T>, seq<T>, map<K,V>, imap<K,V>.
+- Key operations:
+  - Membership: x in s, x !in s
+  - Cardinality: |s| (finite collections)
+  - Sequences: concatenation +, slicing s[lo..hi], s[..hi], s[lo..]
+  - Maps: m[k], m.Keys, m.Items
+
+3.4 Strings
+- string is seq<char> with string literal syntax.
+
+3.5 Type Parameters and Characteristics
+- Constraints (type characteristics):
+  - T(==): equality supported.
+  - T(0): auto‑init (compilable default value exists).
+  - T(00): nonempty type.
+  - T(!new): non‑heap based.
+- Variance: + (covariant), - (contravariant), ! (invariant), * (cardinality).
+
+3.6 Type Synonyms, Abstract Types, Subset Types, Newtypes
+- type T = G (synonym).
+- type T (abstract, opaque) can have members.
+- subset type: type T = x: Base | P(x) witness e / ghost witness e / witness *.
+- newtype: subset type with distinct type identity and controlled conversion.
+
+3.7 Classes and Traits
+- class C extends T1, T2 { members }
+- trait J is abstract superclass; no constructors.
+- Built‑in trait object/object? supports dynamic frame patterns.
+
+3.8 Arrays
+- array<T>, array2<T>, ..., arrayN<T>
+- Nullable variants: array?<T>
+- Array slicing to sequences: a[lo..hi], a[..], a[lo..]
+
+3.9 Datatypes and Codatatypes
+- inductive datatype: finite trees; constructors, destructors, C?.
+- coinductive datatype: infinite objects; coinduction and prefix predicates.
+
+3.10 Arrow Types and Tuples
+- Function types: (T1,...,Tn) -> U (total)
+- Partial and effectful: --> and ~> (depends on reads/requires)
+- Tuple types: (T,U,...) with destructors 0,1,2,...
+
+4) Members: Fields, Consts, Methods, Functions
+4.1 Fields
+- var f: T (mutable). Can be ghost.
+- Fields are only in classes/traits; not at module scope.
+
+4.2 Consts
+- const c: T := e (immutable). Type or value required.
+- Opaque consts hide definitions across module boundaries.
+
+4.3 Methods
+- method, constructor, lemma, twostate lemma, least/greatest lemma.
+- Signature includes parameters, return parameters, specs: requires/ensures/modifies/decreases.
+- Abstract methods require {:extern} or {:axiom} if body is omitted.
+
+4.4 Functions and Predicates
+- function F(...): T { expr }
+- predicate P(...): bool
+- Functions are pure; reads clause bounds heap dependencies.
+- Function‑by‑method: function F ... by method { ... }
+- Opaque functions and reveal control proof visibility.
+
+4.5 Two‑State Members
+- twostate functions and lemmas have current and old heap parameters.
+- old@Label selects a labeled heap snapshot.
+
+4.6 Extreme Predicates and Lemmas
+- least/greatest predicates model inductive/coinductive fixpoints.
+- Prefix predicates P#[k] for bounded reasoning.
+
+5) Specifications and Contracts
+5.1 Requires and Ensures
+- requires: must hold at call sites.
+- ensures: guaranteed on return.
+- Multiple clauses are conjoined in order.
+
+5.2 Frames
+- reads: what heap locations a function/predicate may depend on.
+- modifies: what heap locations a method/loop may update.
+- Frame expressions are sets of objects or frame fields.
+
+5.3 Decreases
+- Ensures termination for recursion and loops.
+- Lexicographic tuples with implicit ⊤ appended.
+- decreases * allows non‑termination for methods/loops.
+
+5.4 Loop Invariants
+- Must hold on entry and after each iteration.
+- Loop frame includes syntactic assignment targets and heap effects.
+
+5.5 Well‑Formedness
+- Specifications are checked for safety independent of method bodies.
+- Examples: no null deref, no division by zero, valid indices.
+
+5.6 Dynamic Frames Pattern
+- Common object invariant style:
+  - ghost var Repr: set<object>
+  - predicate Valid() reads this, Repr
+- AutoContracts ({:autocontracts}) injects boilerplate.
+
+6) Statements: Imperative Core
+6.1 Assignments
+- x := e
+- Parallel: x, y := e1, e2
+- Havoc: x := * (nondeterministic)
+
+6.2 Calls and Updates
+- Method calls as statements (may return out‑params).
+- RHS method calls allowed only in update context.
+
+6.3 Such‑That Assignment
+- x :| P(x) requires existence; use assume to skip proof.
+
+6.4 Conditionals and Loops
+- if guard { ... } else { ... }
+- while guard invariant ... decreases ... { ... }
+- for loops desugar to while.
+
+6.5 Failure‑Aware Updates
+- `:-` uses failure‑compatible types (IsFailure/PropagateFailure/Extract).
+
+6.6 Proof Statements
+- assert, assume, reveal, calc, forall, opaque blocks.
+- assert by { ... } for proof script blocks.
+
+7) Expressions: Pure Core
+7.1 Arithmetic and Logic
+- Standard operators with defined precedence.
+- Implication is a boolean operator; short‑circuiting.
+
+7.2 Old, Fresh, Unchanged
+- old(e): value in pre‑state.
+- old@L(e): value at label L.
+- fresh(e): allocated during method execution.
+- unchanged(e): identical values across states (supports frame fields).
+
+7.3 Quantifiers and Triggers
+- forall, exists with optional domains and triggers.
+- Triggers control instantiation; poor triggers cause failure or instability.
+
+7.4 Lambdas
+- (params) [reads/requires] => body
+
+8) Ghost Code, Erasure, and Definite Assignment
+- ghost members and statements are erased from compiled code.
+- Ghost inference determines ghost contexts.
+- Definite assignment rules depend on type characteristics and options.
+
+9) Termination and Well‑Founded Orders
+- Decreases uses built‑in well‑founded orders:
+  - int: x < X && 0 <= X
+  - seq<T>: proper subsequence
+  - set<T>: proper subset
+  - datatypes: structural inclusion
+  - reference: null < non‑null
+- Coinductive datatypes have no well‑founded order.
+
+10) Refinement and Abstraction
+- Abstract modules define interfaces and proofs.
+- Refining modules add bodies and strengthen ensures.
+- Refinement does not change datatype constructors or newtype bases.
+
+11) Attributes: Operational Control
+- {:axiom}: assume postconditions without proof.
+- {:extern}: bind to target language symbols.
+- {:opaque}/{:transparent}: function visibility.
+- {:fuel}: unfolding depth control.
+- {:induction}: induction variable selection.
+- {:only}, {:focus}, {:split_here}: verification batching control.
+- {:concurrent}: requires reads {} and modifies {}.
+- {:compile false}: omit from compilation.
+- @Attribute(...) new syntax for typed attributes.
+
+12) Tooling: CLI Commands and Behavior
+- resolve: parse + resolve.
+- verify: resolve + verify.
+- translate <lang>: emit target code (with or without verification).
+- build: translate and compile to executable/library.
+- run: build and execute (with argument forwarding).
+- test: run methods marked {:test}.
+- audit: detect axioms, unverified items, unsafe assumptions.
+- format: re‑indent to style.
+
+13) Compilation Targets and Limits
+- Targets: cs, java, js, go, py, cpp (limited), dfy.
+- Runtime libraries required.
+- Some features are not supported uniformly (notably C++ limitations).
+
+14) Verification Reality: Common Failure Sources (FAQ)
+- Missing annotations: invariants, requires/ensures, frames.
+- Quantifier triggers not instantiating.
+- Nonlinear arithmetic complexity.
+- Collection extensionality incompleteness.
+- Heap reasoning via frames and dynamic invariants.
+
+15) Error‑Avoidant Design Patterns
+15.1 Specification Discipline
+- Write preconditions that make all expressions well‑formed.
+- Expose allocation facts with ensures fresh(x).
+- Use subset/newtypes to encode domain constraints early.
+
+15.2 Heap and Frames
+- Always declare modifies for any heap updates.
+- In functions/predicates, specify reads precisely.
+- Use Valid/Repr invariant for object graphs.
+
+15.3 Loop Proofs
+- Invariant includes bounds, relational properties, and preservation facts.
+- Decreases ties directly to loop progress.
+- Split complex loops into helper methods when verification is brittle.
+
+15.4 Quantifiers
+- Avoid quantified formulas over heap unless necessary.
+- Introduce helper functions to create clean triggers when warnings occur.
+
+15.5 Ghost Separation
+- Do not guard non‑ghost updates with ghost predicates.
+- Keep ghost calculations in ghost blocks or ghost variables.
+
+15.6 Opaque Blocks and Lemmas
+- Use opaque blocks to limit proof scope.
+- Extract lemmas for reusable proof steps and inductive reasoning.
+
+16) Canonical Idioms
+16.1 Fresh Allocation
+method MakeArray(n: nat) returns (a: array<int>)
+  ensures a.Length == n
+  ensures fresh(a)
+{
+  a := new int[n];
+}
+
+16.2 Dynamic Frames (Sketch)
+class Node {
+  ghost var Repr: set<object>
+  var next: Node?
+  ghost predicate Valid()
+    reads this, Repr
+  {
+    this in Repr && (next == null || next in Repr && next.Valid())
+  }
+}
+
+16.3 Safe Loop Template
+var i := 0;
+while i < a.Length
+  invariant 0 <= i <= a.Length
+  invariant forall k :: 0 <= k < i ==> a[k] == 0
+  decreases a.Length - i
+{
+  a[i] := 0;
+  i := i + 1;
+}
+
+16.4 Function‑by‑Method
+function Sum(s: seq<int>): int
+  decreases |s|
+{
+  if s == [] then 0 else s[0] + Sum(s[1..])
+}
+function method SumM(s: seq<int>): int by method {
+  var acc := 0;
+  for i := 0 to |s|
+    invariant acc == Sum(s[..i])
+  {
+    acc := acc + s[i];
+  }
+  return acc;
+}
+
+17) Cheatsheet Appendix (Workspace)
+Imperative and OO
+- var: variable declarations; types explicit or inferred.
+- :=: assignment, including parallel assignment.
+- if/else: conditional statements; braces required.
+- if‑then‑else: expression form.
+- while / forall: loops and quantified statements.
+- method / returns: procedures with zero, one, or multiple return values.
+- class: OO types with fields and methods; use requires for null checks.
+- array: heap‑allocated arrays, indexed by a[i].
+
+Specification
+- requires: precondition.
+- ensures: postcondition; multiple clauses allowed.
+- assert / assume: inline propositions.
+- Logical connectives: !, &&, ||, ==> , <== , <==>.
+- forall / exists: quantifiers.
+- function / predicate: pure definitions (function body is an expression).
+- modifies: frame for methods.
+- reads: frame for functions/predicates.
+- invariant: loop invariants.
+- set / seq / multiset: standard collections with membership, slicing, and multiset ops.
+
+End.
